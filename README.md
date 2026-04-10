@@ -1,217 +1,126 @@
-#!/usr/bin/env python3
-"""
-  ██████╗ ██╗  ██╗ ██████╗ ███████╗████████╗██████╗ ███████╗██╗   ██╗
- ██╔════╝ ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝██╔══██╗██╔════╝██║   ██║
- ██║  ███╗███████║██║   ██║███████╗   ██║   ██║  ██║█████╗  ██║   ██║
- ██║   ██║██╔══██║██║   ██║╚════██║   ██║   ██║  ██║██╔══╝  ╚██╗ ██╔╝
- ╚██████╔╝██║  ██║╚██████╔╝███████║   ██║   ██████╔╝███████╗ ╚████╔╝
-  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═════╝ ╚══════╝  ╚═══╝
+💀 GhostDev
+AI That Finishes Your Work Without You
+GhostDev is an autonomous AI agent that silently watches your Git repository and acts as a ghost developer working behind you. It detects what you're trying to build, completes your unfinished code, fixes bugs, and pushes commits — automatically.
+✨ Features
+👁 Watches your repo — monitors file changes in real time
+🧠 Understands intent — reads goals.txt, TODOs, commit history, README, and stub functions
+✍️ Writes missing code — completes stub functions and implements TODO comments
+🐛 Fixes bugs — detects and patches broken code
+✅ Validates before committing — syntax check + flake8 lint, never pushes broken code
+💾 Auto-commits — commits with 👻 GhostDev: message and pushes to origin
+🚀 Quick Start
+1. Clone the repo
+git clone https://github.com/YOUR_USERNAME/ghostdev
+cd ghostdev
+2. Install dependencies
+pip install -r requirements.txt
+3. Set your API key
+Get a free key at console.anthropic.com
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+4. Describe your goal
+echo "create a login system with username and password validation" > goals.txt
+5. Run GhostDev
+Watch mode (activates after 30s of idle):
+python3 ghost-dev.py
+One-shot mode (run immediately and exit):
+python3 ghost-dev.py --once
+Dry run (preview changes without writing):
+python3 ghost-dev.py --once --dry-run
+🎮 Demo — See It In Action
+Create a Python file with empty functions:
+# login.py
 
-  AI That Finishes Your Work Without You
-  GitAgent Hackathon 2026
-"""
+def register_user(username, password):
+    # TODO: hash password and store user
+    pass
 
-import os
-import sys
-import time
-import argparse
+def login(username, password):
+    # TODO: validate credentials and return session token
+    pass
 
-from watcher           import GhostWatcher
-from context_harvester import harvest_context
-from ai_engine         import generate_completion, generate_bug_fix
-from code_validator    import validate_string, run_tests
-from git_manager       import commit_and_push, get_repo_root, get_recent_log
-
-
-# ── Config ───────────────────────────────────────────────────────────────────
-
-DEFAULT_IDLE_THRESHOLD = 30   # seconds before ghost activates
-POLL_INTERVAL          = 5    # seconds between idle checks
-BANNER = """
-💀  GhostDev is watching your repo...
-    Waiting for you to go idle ({threshold}s of no changes)
-    Press Ctrl+C to stop.
-"""
-
-
-# ── Core Loop ─────────────────────────────────────────────────────────────────
-
-def run_ghost_pass(repo_path: str, context: dict, dry_run: bool = False) -> int:
-    """
-    One full ghost pass:
-      1. Find all stub/todo files
-      2. For each, generate completion via Claude
-      3. Validate the result
-      4. Write + commit if valid
-    Returns number of files successfully completed.
-    """
-    stubs = context.get('stubs', {})
-    if not stubs:
-        print("  ✅ No incomplete files found. Repo looks clean!")
-        return 0
-
-    print(f"\n  🔍 Found {len(stubs)} file(s) that need work:")
-    for rel in stubs:
-        print(f"     • {rel}")
-
-    completed = 0
-    for rel_path, original_content in stubs.items():
-        abs_path = os.path.join(repo_path, rel_path)
-        print(f"\n  🤖 Processing: {rel_path}")
-
-        # ── Generate completion ──────────────────────────────────────────────
-        try:
-            completed_code = generate_completion(context, rel_path, original_content)
-        except Exception as e:
-            print(f"     ❌ Claude API error: {e}")
-            continue
-
-        # ── Validate before touching the file ───────────────────────────────
-        ok, msg = validate_string(completed_code, filename=rel_path)
-        if not ok:
-            print(f"     ⚠️  Validation failed — attempting auto-fix...")
-            try:
-                completed_code = generate_bug_fix(
-                    context, rel_path, completed_code, msg
-                )
-                ok, msg = validate_string(completed_code, filename=rel_path)
-            except Exception as e:
-                print(f"     ❌ Bug-fix API error: {e}")
-
-        if not ok:
-            print(f"     ❌ Still invalid after fix attempt — skipping.\n     {msg}")
-            continue
-
-        print(f"     ✅ Validation passed")
-
-        if dry_run:
-            print(f"     🔍 [DRY RUN] Would write and commit {rel_path}")
-            print("     ── Preview (first 20 lines) ──")
-            for line in completed_code.splitlines()[:20]:
-                print(f"        {line}")
-            completed += 1
-            continue
-
-        # ── Write file ───────────────────────────────────────────────────────
-        try:
-            with open(abs_path, 'w', encoding='utf-8') as f:
-                f.write(completed_code)
-        except IOError as e:
-            print(f"     ❌ Could not write file: {e}")
-            continue
-
-        # ── Commit & push ────────────────────────────────────────────────────
-        commit_msg = f"👻 GhostDev: complete {rel_path}"
-        success = commit_and_push(repo_path, abs_path, commit_msg)
-        if success:
-            completed += 1
-        else:
-            print(f"     ⚠️  File written but git operation failed for {rel_path}")
-
-    return completed
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="GhostDev – AI that finishes your work without you"
-    )
-    parser.add_argument(
-        '--repo', default='.',
-        help='Path to git repository to watch (default: current directory)'
-    )
-    parser.add_argument(
-        '--idle', type=int, default=DEFAULT_IDLE_THRESHOLD,
-        help=f'Seconds of inactivity before ghost activates (default: {DEFAULT_IDLE_THRESHOLD})'
-    )
-    parser.add_argument(
-        '--once', action='store_true',
-        help='Run one pass immediately and exit (no watching)'
-    )
-    parser.add_argument(
-        '--dry-run', action='store_true',
-        help='Show what would be changed without writing or committing'
-    )
-    args = parser.parse_args()
-
-    # ── Validate environment ─────────────────────────────────────────────────
-    if not os.environ.get('ANTHROPIC_API_KEY'):
-        print("❌ ANTHROPIC_API_KEY environment variable not set.")
-        print("   Get a free key at: https://console.anthropic.com")
-        print("   Then run: export ANTHROPIC_API_KEY='your-key-here'")
-        sys.exit(1)
-
-    try:
-        repo_path = get_repo_root(args.repo)
-    except RuntimeError as e:
-        print(f"❌ {e}")
-        sys.exit(1)
-
-    print(f"\n💀  GhostDev – AI That Finishes Your Work Without You")
-    print(f"    Repo : {repo_path}")
-    print(f"    Model: claude-opus-4-5")
-    if args.dry_run:
-        print(f"    Mode : DRY RUN (no files will be written)")
-
-    # ── One-shot mode ────────────────────────────────────────────────────────
-    if args.once:
-        print("\n🔍 Harvesting context...")
-        context = harvest_context(repo_path)
-        print(f"   Goals   : {context['goals'][:80]}...")
-        print(f"   TODOs   : {len(context['todos'].splitlines())} found")
-        print(f"   Stubs   : {len(context['stubs'])} file(s)")
-        print(f"   Commits : {context['commits'].splitlines()[0] if context['commits'] else 'none'}")
-
-        print("\n💀 Ghost taking over...\n")
-        n = run_ghost_pass(repo_path, context, dry_run=args.dry_run)
-        print(f"\n✅ Done. {n} file(s) completed.")
-        if not args.dry_run and n:
-            print("\n📜 Recent git log:")
-            print(get_recent_log(repo_path))
-        return
-
-    # ── Daemon / watch mode ──────────────────────────────────────────────────
-    print(BANNER.format(threshold=args.idle))
-
-    watcher = GhostWatcher(repo_path, idle_threshold=args.idle)
-    watcher.start()
-
-    try:
-        while True:
-            time.sleep(POLL_INTERVAL)
-
-            idle_secs = watcher.seconds_since_last_change()
-
-            if watcher.is_developer_idle():
-                print(f"\n💀 Developer idle for {idle_secs:.0f}s — Ghost taking over...")
-
-                # Harvest fresh context
-                context = harvest_context(repo_path)
-
-                if not context['stubs']:
-                    print("  ✅ Repo looks complete. Nothing to do.")
-                    watcher.reset()
-                    continue
-
-                # Run the ghost pass
-                n = run_ghost_pass(repo_path, context, dry_run=args.dry_run)
-
-                if n:
-                    print(f"\n✅ Ghost completed {n} file(s).")
-                    print("\n📜 Recent git log:")
-                    print(get_recent_log(repo_path))
-
-                # Reset so we don't re-trigger immediately
-                watcher.reset()
-                print(f"\n👻 Ghost going back into hiding... watching for more changes.\n")
-
-            else:
-                remaining = args.idle - idle_secs
-                print(f"\r  ⏳ Developer active. Ghost activates in {remaining:.0f}s...", end='', flush=True)
-
-    except KeyboardInterrupt:
-        print("\n\n👋 GhostDev stopped.")
-        watcher.stop()
-
-
-if __name__ == '__main__':
-    main()# ghostdev-agent
+def logout(session_token):
+    pass
+Run GhostDev:
+python3 ghost-dev.py --idle 10
+Stop typing. Wait 10 seconds.
+Watch GhostDev complete your code and push a commit automatically.
+Check the git log:
+git log --oneline
+# 👻 GhostDev: complete login.py
+⚙️ Options
+Flag
+Default
+Description
+--repo PATH
+.
+Path to git repo to watch
+--idle N
+30
+Seconds of inactivity before activation
+--once
+off
+Run one pass immediately and exit
+--dry-run
+off
+Preview changes without writing or committing
+🏗 Architecture
+Git Repo
+   ↓ (watchdog — real-time file events)
+GhostWatcher — detects developer idle
+   ↓
+ContextHarvester — reads:
+   • goals.txt
+   • TODO/FIXME comments
+   • Git commit history
+   • Stub functions (ast parsing)
+   • README.md
+   ↓
+Claude API (claude-opus-4-5, 200K context)
+   ↓
+CodeValidator — syntax + flake8 lint
+   ↓
+GitManager — stage → commit → push
+🛠 Tech Stack
+Layer
+Technology
+AI Brain
+Anthropic Claude API (claude-opus-4-5)
+File Watching
+watchdog
+Git Operations
+subprocess + git CLI
+Code Validation
+py_compile + flake8 + pytest
+Intent Parsing
+Python ast module
+Language
+Python 3.10+
+📁 File Structure
+ghostdev/
+├── ghost-dev.py          # Main entry point & daemon loop
+├── watcher.py            # Real-time file system watcher
+├── context_harvester.py  # Multi-signal intent extraction
+├── ai_engine.py          # Claude API integration
+├── code_validator.py     # Syntax & lint validation
+├── git_manager.py        # Git stage, commit, push
+├── goals.txt             # Describe what you're building
+├── requirements.txt
+└── README.md
+🔑 Intent Signals
+GhostDev doesn't just read one file — it harvests 6 intent signals to deeply understand what you're trying to build:
+Signal
+Source
+Explicit goal
+goals.txt
+Inline TODOs
+All .py files
+Commit history
+git log
+Stub functions
+AST parsing
+Project description
+README.md
+Missing references
+Import errors
+📄 License
+MIT — built for the GitAgent Hackathon 2026
