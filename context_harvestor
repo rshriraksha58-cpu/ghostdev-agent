@@ -1,0 +1,126 @@
+import os
+import ast
+import subprocess
+
+
+def harvest_context(repo_path: str) -> dict:
+    """
+    Harvest all intent signals from the repository.
+    Returns a dict with goals, todos, commits, stubs, readme, missing refs.
+    """
+    context = {}
+    context['goals']   = _read_goals(repo_path)
+    context['readme']  = _read_readme(repo_path)
+    context['commits'] = _get_recent_commits(repo_path)
+    context['todos']   = _extract_todos(repo_path)
+    context['stubs']   = _find_stub_files(repo_path)
+    return context
+
+
+# ── Internal helpers ────────────────────────────────────────────────────────
+
+def _read_goals(repo_path: str) -> str:
+    for name in ['goals.txt', 'GOALS.txt', 'goals.md']:
+        path = os.path.join(repo_path, name)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read().strip()
+    return "No goals.txt found. Inferring from code and commits."
+
+
+def _read_readme(repo_path: str) -> str:
+    for name in ['README.md', 'README.txt', 'README']:
+        path = os.path.join(repo_path, name)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()[:2000]   # cap at 2000 chars
+    return "No README found."
+
+
+def _get_recent_commits(repo_path: str, n: int = 10) -> str:
+    try:
+        result = subprocess.run(
+            ['git', 'log', f'-{n}', '--oneline'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return result.stdout.strip() or "No commits yet."
+    except Exception as e:
+        return f"Could not read git log: {e}"
+
+
+def _extract_todos(repo_path: str) -> str:
+    """Find all TODO/FIXME/HACK/BUG comments in .py files."""
+    todos = []
+    keywords = ('TODO', 'FIXME', 'HACK', 'BUG', 'XXX', 'NOCOMMIT')
+    for root, dirs, files in os.walk(repo_path):
+        # skip hidden dirs and __pycache__
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+        for fname in files:
+            if not fname.endswith('.py'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                    for lineno, line in enumerate(f, 1):
+                        if any(kw in line for kw in keywords):
+                            rel = os.path.relpath(fpath, repo_path)
+                            todos.append(f"  {rel}:{lineno}: {line.strip()}")
+            except Exception:
+                continue
+    return '\n'.join(todos) if todos else "None found."
+
+
+def _find_stub_files(repo_path: str) -> dict:
+    """
+    Return a dict of {relative_path: file_content} for every Python file
+    that contains at least one stub function (body is only `pass` or empty docstring).
+    """
+    stubs = {}
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+        for fname in files:
+            if not fname.endswith('.py'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                    source = f.read()
+                if _has_stubs(source) or _has_todos_inline(source):
+                    rel = os.path.relpath(fpath, repo_path)
+                    stubs[rel] = source
+            except Exception:
+                continue
+    return stubs
+
+
+def _has_stubs(source: str) -> bool:
+    """Return True if source contains any function/method whose body is just pass."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            # skip docstring-only bodies
+            if len(body) == 1:
+                stmt = body[0]
+                # pure pass
+                if isinstance(stmt, ast.Pass):
+                    return True
+                # docstring then nothing (length==1 means only docstring)
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+                    return True
+            # pass after docstring
+            if len(body) == 2:
+                if isinstance(body[1], ast.Pass):
+                    return True
+    return False
+
+
+def _has_todos_inline(source: str) -> bool:
+    keywords = ('TODO', 'FIXME', 'HACK', 'BUG')
+    return any(kw in source for kw in keywords)
